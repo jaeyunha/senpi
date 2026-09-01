@@ -73,7 +73,6 @@ type ProtocolInfo = {
 
 const lockOptions = { retries: { retries: 100, minTimeout: 20, maxTimeout: 100 } } as const;
 const REQUIRED_CAPABILITIES = ["multi_session", EXTENSION_EVENTS_CAPABILITY] as const;
-const EXISTING_HOST_PROBE_TIMEOUT_MS = 10_000;
 /**
  * Every ensured host starts with this installation-wide profile, independent of
  * the first caller. In particular, extension_events must remain available when
@@ -119,7 +118,7 @@ async function ensureHostLocked(
 	testOptions: EnsureHostOptions["_test"],
 ): Promise<EnsuredHost> {
 	const pidFile = await readPidFile(paths);
-	const protocol = await probeProtocolInfo(socket, EXISTING_HOST_PROBE_TIMEOUT_MS);
+	const protocol = await probeProtocolInfo(socket, 1_000);
 	const pidMatches = pidFile ? await processMatchesPidFile(pidFile) : false;
 	if (isCompatible(protocol)) {
 		// A compatible socket is attachable even when another client surface
@@ -275,23 +274,11 @@ async function pollProtocolInfo(
 	let lastProtocol: ProtocolInfo | undefined;
 	while (Date.now() <= deadline) {
 		const probe = probeProtocolInfo(socket, Math.min(500, Math.max(1, deadline - Date.now())));
-		const raced = childExit ? await Promise.race([probe, childExit]) : await probe;
-		if (isChildExit(raced)) {
-			// A supervisor exit can be triggered by the Windows identity watchdog
-			// while a named-pipe client is still composing its protocol reply. Do
-			// not terminate the host based solely on that exit until this probe has
-			// had a chance to deliver an answer. A host that never answers still
-			// resolves through probeProtocolInfo's bounded timeout/close handling.
-			const info = await probe;
-			if (info) {
-				lastProtocol = info;
-				if (isCompatible(info)) return { protocol: info };
-			} else {
-				return { protocol: lastProtocol, exited: raced };
-			}
-		} else if (raced) {
-			lastProtocol = raced;
-			if (isCompatible(raced)) return { protocol: raced };
+		const info = childExit ? await Promise.race([probe, childExit]) : await probe;
+		if (isChildExit(info)) return { protocol: lastProtocol, exited: info };
+		if (info) {
+			lastProtocol = info;
+			if (isCompatible(info)) return { protocol: info };
 		}
 		await delay(50);
 	}
